@@ -38,14 +38,32 @@ class ChildElementContainerPreviewListener extends ContentElementViewListener {
 	}
 
 	public function generateLabel(array $row, string $label, DC_Table $dc): array|string {
+		$isGroupType = \in_array($row['type'] ?? null, ['element_group', 'tabs'], true);
+
+        // Upstream bug: nested_grid_records.html.twig always expects record.operations,
+        // but generateRecords() only sets it when act !== 'select'. This only crashes
+        // for group/tabs rows that actually HAVE children (parent::generateLabel()
+        // returns safely before the twig render otherwise) — so only bypass parent
+        // for that exact combination, not select mode in general.
+        if ($isGroupType && Input::get('act') === 'select') {
+            $hasChildren = ContentModel::countBy(['pid = ?', 'ptable = ?'], [$row['id'], 'tl_content']) > 0;
+
+            if ($hasChildren) {
+                return $this->generateSelectModeLabel($row, $label, $dc);
+            }
+        }
+		
 		$label = $this->inner->generateLabel($row, $label, $dc);
 
+		
 		if ($dc->parentTable !== 'tl_theme') {
+
 			$childRecords = ContentModel::findBy(['pid = ?', 'ptable = ?'], [$row['id'], 'tl_content'], ['order' => 'sorting ASC'])?->fetchAll() ?? [];
+			
 			if (\count($childRecords) === 0) {
 				return $label;
 			}
-
+			
 			$label[1] = $this->twig->render('@Contao/backend/data_container/table/view/nested_grid_records.html.twig', [
 				'records' => $this->generateRecords($childRecords, $dc),
 				'table' => $dc->table,
@@ -59,6 +77,35 @@ class ChildElementContainerPreviewListener extends ContentElementViewListener {
 
 		return $label;
 	}
+	private function generateSelectModeLabel(array $row, array|string $label, DC_Table $dc): array|string
+    {
+        $children = ContentModel::findBy(['pid = ?', 'ptable = ?'], [$row['id'], 'tl_content'], ['order' => 'sorting'])?->fetchAll() ?? [];
+
+        if (!$children) {
+            return $label;
+        }
+
+        $items = '';
+
+        foreach ($children as $child) {
+            // Reuses the same public API the bundle itself calls for the normal
+            // (non-select) case — this recurses correctly through our own
+            // generateLabel() for nested groups, and safely bypasses it for
+            // ordinary content types.
+            $childLabel = $dc->generateRecordLabel($child);
+            $preview = \is_array($childLabel) ? trim($childLabel[1] ?? '') : (string) $childLabel;
+
+            $items .= '<li>'.($preview !== '' ? $preview : '<em>'.($child['type'] ?? '').'</em>').'</li>';
+        }
+
+        if (!\is_array($label)) {
+            $label = [$label, ''];
+        }
+
+        $label[1] = ($label[1] ?? '').'<ul class="content-element-group-select-preview">'.$items.'</ul>';
+
+        return $label;
+    }
 
 	private function generateRecords(array $rows, DataContainer $dataContainer): array {
 		$blnHasSorting = ($GLOBALS['TL_DCA']['tl_content']['list']['sorting']['fields'][0] ?? null) == 'sorting';
